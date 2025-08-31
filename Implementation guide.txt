@@ -1,0 +1,662 @@
+# Study Buddy - Production Implementation Guide
+
+## Phase 1: Pre-Launch Essentials (Integrate into Weeks 1-3)
+
+### APIs & Credentials (Must Provide)
+
+Configure via `app.json`/`app.config.js` `expo.extra` (or env-injected config) as referenced by `getAppConfig()`:
+
+- Sentry (Crash reporting)
+  - DSN: `extra.sentry.dsn`
+  - Example:
+    ```json
+    {
+      "extra": { "sentry": { "dsn": "https://<key>@oXXXX.ingest.sentry.io/XXXX" } }
+    }
+    ```
+
+- PostHog (Analytics) – optional but expected in prod gate
+  - API Key: `extra.posthog.apiKey`
+  - Host: `extra.posthog.host` (e.g., `https://us.i.posthog.com`)
+  - Example:
+    ```json
+    {
+      "extra": { "posthog": { "apiKey": "phc_...", "host": "https://us.i.posthog.com" } }
+    }
+    ```
+
+- RevenueCat (Purchases / Subscriptions)
+  - iOS API key: `extra.revenuecat.iosApiKey`
+  - Android API key: `extra.revenuecat.androidApiKey`
+  - Entitlement ID: `extra.revenuecat.entitlementId` (default `premium`)
+  - Example:
+    ```json
+    {
+      "extra": { "revenuecat": { "iosApiKey": "appl_...", "androidApiKey": "goog_...", "entitlementId": "premium" } }
+    }
+    ```
+
+- Manage Subscriptions deep links (Store pages)
+  - iOS: `extra.manageSubscriptions.ios` (default `itms-apps://apps.apple.com/account/subscriptions`)
+  - Android: `extra.manageSubscriptions.android` (default Play URL)
+
+- Legal URLs
+  - Privacy Policy: `extra.urls.privacyPolicy`
+  - Terms of Service: `extra.urls.termsOfService`
+  - Support: `extra.urls.support`
+
+Production guardrails (already in code): app will soft‑block if Sentry DSN, PostHog (key+host), or RevenueCat (platform key) are missing.
+
+### 0. Voice & Notifications Setup (1 day)
+
+#### A. Install and configure Expo modules
+```bash
+npm install expo-speech expo-av expo-notifications
+expo install expo-speech expo-av expo-notifications
+```
+
+#### B. iOS: enable audio in silent mode
+```javascript
+// On app bootstrap (e.g., App.tsx)
+import { Audio } from 'expo-av';
+
+await Audio.setAudioModeAsync({
+  allowsRecordingIOS: true,
+  playsInSilentModeIOS: true,
+});
+```
+
+#### C. Android: notification channel and category
+```javascript
+import * as Notifications from 'expo-notifications';
+
+if (Platform.OS === 'android') {
+  await Notifications.setNotificationChannelAsync('checkins', {
+    name: 'Check-ins',
+    importance: Notifications.AndroidImportance.DEFAULT,
+    vibrationPattern: [0, 250, 250, 250],
+  });
+}
+
+await Notifications.setNotificationCategoryAsync('checkin-actions', [
+  { identifier: 'RESUME', buttonTitle: 'Resume' },
+  { identifier: 'BREAK', buttonTitle: '+5 min break' },
+  { identifier: 'DONE', buttonTitle: "I'm done" },
+]);
+```
+
+#### D. Speech settings defaults
+Ensure `speechSettings` defaults enable speech for main/calm/celebration and set neutral rate/pitch. Expose a simple settings UI to toggle and adjust.
+
+### 1. Error Handling & Crash Reporting (2 days)
+
+#### A. Install Sentry
+```bash
+npm install @sentry/react-native
+cd ios && pod install
+npx @sentry/wizard -i reactNative -p ios android
+```
+
+#### B. Create Error Boundary Component
+```javascript
+// src/components/ErrorBoundary.js
+import React from 'react';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import * as Sentry from '@sentry/react-native';
+
+class ErrorBoundary extends React.Component {
+  state = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    Sentry.captureException(error, { extra: errorInfo });
+  }
+
+  resetError = () => {
+    this.setState({ hasError: false, error: null });
+  };
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={styles.container}>
+          <Text style={styles.emoji}>😢</Text>
+          <Text style={styles.title}>Oops! Something went wrong</Text>
+          <Text style={styles.message}>
+            Don't worry, your buddy is just taking a quick break!
+          </Text>
+          <TouchableOpacity style={styles.button} onPress={this.resetError}>
+            <Text style={styles.buttonText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+```
+
+#### C. Wrap App with Error Handling
+```javascript
+// App.js updates
+import * as Sentry from '@sentry/react-native';
+import ErrorBoundary from './src/components/ErrorBoundary';
+
+Sentry.init({
+  dsn: 'YOUR_SENTRY_DSN',
+  environment: __DEV__ ? 'development' : 'production',
+  beforeSend(event) {
+    // Don't send events in development
+    if (__DEV__) return null;
+    // Filter out non-critical errors
+    if (event.level === 'warning') return null;
+    return event;
+  },
+});
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <SubscriptionContext.Provider value={{ isPremium, checkPremiumStatus }}>
+        {/* Rest of app */}
+      </SubscriptionContext.Provider>
+    </ErrorBoundary>
+  );
+}
+```
+
+### 2. Critical E2E Tests (3 days)
+
+#### A. Install Detox
+```bash
+npm install --save-dev detox @types/detox jest
+npm install --save-dev detox-expo-helpers expo-detox-hook
+```
+
+#### B. Core Test Implementation
+```javascript
+// test/e2e/critical-paths.test.js
+describe('Critical User Paths', () => {
+  beforeAll(async () => {
+    await device.launchApp({ 
+      newInstance: true,
+      permissions: { notifications: 'YES', camera: 'YES' }
+    });
+  });
+
+  describe('First Time User Experience', () => {
+    it('should complete onboarding in under 30 seconds', async () => {
+      // Test implementation
+      await expect(element(by.id('welcome-screen'))).toBeVisible();
+      await element(by.id('age-8-10')).tap();
+      await element(by.id('buddy-cat')).tap();
+      await element(by.id('start-button')).tap();
+      
+      // Verify we're on main screen
+      await expect(element(by.id('mode-selection'))).toBeVisible();
+      
+      // Verify data saved
+      // Add timing assertion
+    });
+  });
+
+  describe('Core Study Session', () => {
+    it('should complete a full study session', async () => {
+      await element(by.id('study-mode-button')).tap();
+      await element(by.id('subject-math')).tap();
+      await element(by.id('start-session')).tap();
+      
+      // Verify timer starts
+      await expect(element(by.id('timer-display'))).toBeVisible();
+      
+      // Fast forward to check-in (mock timer)
+      await device.shake(); // Trigger dev menu
+      await element(by.text('Trigger Check-in')).tap();
+      
+      // Verify check-in appears
+      await expect(element(by.id('checkin-message'))).toBeVisible();
+      
+      // Complete session
+      await element(by.id('end-session')).tap();
+      await expect(element(by.id('celebration-screen'))).toBeVisible();
+    });
+  });
+
+  describe('Parent Settings Protection', () => {
+    it('should require math answer to access settings', async () => {
+      await element(by.id('settings-button')).tap();
+      await expect(element(by.id('parent-gate'))).toBeVisible();
+      
+      // Get math question and solve it
+      const question = await element(by.id('math-question')).getAttributes();
+      // Parse and solve...
+      
+      await element(by.id('math-answer')).typeText('42');
+      await element(by.id('submit-answer')).tap();
+      
+      await expect(element(by.id('parent-settings'))).toBeVisible();
+    });
+  });
+});
+```
+
+### 3. Actual Assets Creation (2 days)
+
+#### A. Quick Asset Generation
+```bash
+# Use free tools for MVP:
+# 1. Icons - Use Canva or Figma templates
+# 2. Animations - Download from LottieFiles
+# 3. Sounds - Generate with AI or use Freesound.org
+
+# Create asset structure:
+mkdir -p assets/{animations,sounds,images}
+```
+
+#### B. Asset Integration Checklist
+```javascript
+// src/assets/index.js
+export const ASSETS = {
+  animations: {
+    catStudying: require('./animations/cat-studying.json'),
+    dogStudying: require('./animations/dog-studying.json'),
+    robotStudying: require('./animations/robot-studying.json'),
+    celebration: require('./animations/celebration.json'),
+    breathing: require('./animations/breathing-circle.json'),
+  },
+  sounds: {
+    checkIn: require('./sounds/gentle-bell.mp3'),
+    success: require('./sounds/success-chime.mp3'),
+    celebration: require('./sounds/celebration.mp3'),
+    tick: require('./sounds/soft-tick.mp3'),
+  },
+  images: {
+    icon: require('./images/icon.png'),
+    splash: require('./images/splash.png'),
+  }
+};
+```
+
+#### C. Lottie Selection Criteria
+- Seamless loop (no jump/flicker) for idle/focus animations
+- Transparent background to blend with themed screens
+- Lightweight JSON (target < 200–500 KB) and short loops (1–3s)
+- Mobile-friendly (avoid heavy masks/expressions); test on low-end Android
+- Editable vector colors (no embedded rasters) for theming
+- Markers/segments optional; helpful for partial playback
+- Licensing suitable for commercial use; attribution if required
+- Style consistency across avatars, breathing, and celebration
+
+#### D. Lottie Integration Examples
+Buddy on main screen (pause when faded):
+```tsx
+import React, { useRef, useEffect } from 'react';
+import LottieView from 'lottie-react-native';
+import { ASSETS } from '@assets';
+
+export function BuddyAnimation({ variant = 'robotStudying', faded = false }) {
+  const animRef = useRef(null);
+  useEffect(() => { if (faded) animRef.current?.pause(); else animRef.current?.play(); }, [faded]);
+  return (
+    <LottieView
+      ref={animRef}
+      source={ASSETS.animations[variant]}
+      autoPlay
+      loop
+      speed={1}
+      style={{ width: 200, height: 200 }}
+      accessible
+      accessibilityLabel="Study buddy animation"
+      importantForAccessibility="no"
+    />
+  );
+}
+```
+
+Calm mode breathing:
+```tsx
+<LottieView
+  source={ASSETS.animations.breathing}
+  autoPlay
+  loop
+  speed={0.6}
+  style={{ width: 240, height: 240 }}
+  accessible
+  accessibilityLabel="Breathing guide"
+/>
+```
+
+Celebration (play once, then navigate):
+```tsx
+<LottieView
+  source={ASSETS.animations.celebration}
+  autoPlay
+  loop={false}
+  style={{ width: 260, height: 260 }}
+  onAnimationFinish={() => navigation.replace('Main')}
+/>
+```
+
+Performance tips:
+- Keep JSON small and avoid stacking multiple large Lotties on one screen
+- Test FPS/battery on mid/low-end Android
+- Consider renderMode tweaks on Android if needed (e.g., HARDWARE), fallback if artifacts
+
+#### E. Avatar Count Guidance
+- MVP (lean): 4 avatars total
+  - 1 elementary-friendly (e.g., cat or dog)
+  - 2 tween vibes (e.g., dragon, wolf or alien)
+  - 1 teen minimal/zen (e.g., geometric or plant)
+- Launch target: 6–7 avatars total to cover the catalog by age (elementary: cat/dog; tween: dragon/wolf/alien; teen: geometric/plant)
+- Post-launch: optional variants (light/dark/seasonal) without increasing core count; keep style and size consistent
+- File naming: `avatar-<name>-studying.json`; keep aspect and palette consistent for layout/theme cohesion
+
+### 4. Performance Monitoring (1 day)
+
+#### A. Add Performance Tracking
+```javascript
+// src/utils/performance.js
+import * as Sentry from '@sentry/react-native';
+
+export const trackPerformance = {
+  measureScreenLoad: (screenName) => {
+    const transaction = Sentry.startTransaction({
+      name: `Screen Load: ${screenName}`,
+    });
+    return () => transaction.finish();
+  },
+  
+  trackRenderTime: async (componentName, renderFn) => {
+    const start = Date.now();
+    const result = await renderFn();
+    const duration = Date.now() - start;
+    
+    if (duration > 100) { // Log slow renders
+      Sentry.captureMessage(`Slow render: ${componentName}`, {
+        level: 'warning',
+        extra: { duration }
+      });
+    }
+    return result;
+  }
+};
+```
+
+## Phase 2: Launch Week Additions
+
+### 4.5. Module Aliases & Types (0.5 day)
+
+Ensure path aliases used in app code (e.g., `@utils/*`, `@assets/*`, `@config/*`, `@types/*`) are configured identically in Babel and TypeScript.
+
+```javascript
+// babel.config.js
+module.exports = function(api) {
+  api.cache(true);
+  return {
+    presets: ['babel-preset-expo'],
+    plugins: [
+      ['module-resolver', {
+        root: ['./'],
+        alias: {
+          '@utils': './src/utils',
+          '@assets': './src/assets',
+          '@config': './src/config',
+          '@types': './src/types',
+          '@components': './src/components',
+        }
+      }]
+    ]
+  };
+};
+```
+
+```json
+// tsconfig.json
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@utils/*": ["src/utils/*"],
+      "@assets/*": ["src/assets/*"],
+      "@config/*": ["src/config/*"],
+      "@types/*": ["src/types/*"],
+      "@components/*": ["src/components/*"]
+    }
+  }
+}
+```
+
+### 5. Analytics Implementation (1 day)
+
+```javascript
+// src/utils/analytics.js
+import * as Sentry from '@sentry/react-native';
+
+class Analytics {
+  trackEvent(eventName, properties = {}) {
+    // Add to Sentry as breadcrumb
+    Sentry.addBreadcrumb({
+      message: eventName,
+      category: 'user-action',
+      data: properties,
+    });
+    
+    // If using Mixpanel/Amplitude later
+    // Mixpanel.track(eventName, properties);
+  }
+  
+  trackScreen(screenName) {
+    this.trackEvent('screen_view', { screen: screenName });
+  }
+  
+  trackTiming(category, value) {
+    this.trackEvent('timing', { category, value });
+  }
+}
+
+export default new Analytics();
+```
+
+### 6. Privacy & Legal (1 day)
+
+#### A. Generate Documents
+```markdown
+# Use Termly.io or similar service to generate:
+1. Privacy Policy
+2. Terms of Service
+3. COPPA Compliance Statement
+
+# Host on GitHub Pages:
+https://yourusername.github.io/study-buddy-legal/privacy
+https://yourusername.github.io/study-buddy-legal/terms
+```
+
+#### B. In-App Integration
+```javascript
+// src/screens/LegalScreen.js
+import { WebView } from 'react-native-webview';
+
+export default function LegalScreen({ route }) {
+  const { type } = route.params;
+  const urls = {
+    privacy: 'https://yourusername.github.io/study-buddy-legal/privacy',
+    terms: 'https://yourusername.github.io/study-buddy-legal/terms',
+  };
+  
+  return <WebView source={{ uri: urls[type] }} />;
+}
+```
+
+## Phase 3: Post-Launch Improvements (Week 4+)
+
+### 7. Unit Tests for Session Messaging (0.5 day)
+
+Add tests for `generatePeerLine` to guarantee phase coherence and reduced repetition.
+
+Test cases:
+- Early/mid/late: lines come from correct pools given ratio thresholds.
+- Threshold jitter: earlyCut ∈ [0.20, 0.40], lateCut ∈ [0.60, 0.80].
+- Recency LRU: no immediate repeats within last N lines for a phase.
+- Hint rate: ~40% of lines include a hint over many samples.
+- Session salt: different sessions produce varied sequences at same times.
+
+Minimal example (pseudo-Jest):
+```ts
+it('uses late pool after threshold', () => {
+  const late = generatePeerLine({ ageGroup: 'tween', subjectId: 'biology', seconds: 1000, sessionLength: 1200, sessionId: 'A' });
+  expect(late).toMatch(/Almost there|Push to the finish|Wrap-up|Finish strong|Final stretch/i);
+});
+```
+
+### 7. CI/CD Pipeline Setup
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-node@v2
+      - run: npm ci
+      - run: npm run test:unit
+      - run: npm run test:e2e:critical
+      
+  build:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - run: npm ci
+      - run: npm run build:ios
+      - run: npm run build:android
+```
+
+### 8. Accessibility Enhancements
+
+```javascript
+// src/utils/accessibility.js
+export const a11y = {
+  // Ensure all interactive elements have labels
+  button: (label, hint) => ({
+    accessible: true,
+    accessibilityLabel: label,
+    accessibilityHint: hint,
+    accessibilityRole: 'button',
+  }),
+  
+  // Announce important changes
+  announce: (message) => {
+    AccessibilityInfo.announceForAccessibility(message);
+  },
+};
+```
+
+## Implementation Priority Order
+
+**Week 1 (Alongside MVP Development):**
+1. ✅ Error boundaries and crash reporting (2 hours)
+2. ✅ Basic E2E test setup (4 hours)
+3. ✅ Asset creation/download (4 hours)
+
+**Week 2 (Testing Phase):**
+4. ✅ Complete E2E test suite (2 days)
+5. ✅ Performance monitoring setup (4 hours)
+6. ✅ Privacy documents (2 hours)
+
+**Week 3 (Launch Prep):**
+7. ✅ Analytics implementation (4 hours)
+8. ✅ Platform-specific fixes (1 day)
+9. ✅ Support email setup (2 hours)
+
+**Post-Launch:**
+10. CI/CD pipeline (1 day)
+11. Advanced accessibility (2 days)
+12. Security hardening (1 day)
+13. Update mechanism (1 day)
+
+## Quick Start Commands
+
+```bash
+# Start with error handling
+npm install @sentry/react-native
+npx @sentry/wizard -i reactNative -p ios android
+
+# Add E2E testing
+npm install --save-dev detox
+npm run test:e2e:setup
+
+# Generate assets quickly
+# Use Canva templates: https://www.canva.com/templates/?query=app+icon
+# Download from LottieFiles: https://lottiefiles.com/featured
+
+# Create privacy policy
+# Go to: https://www.termly.io/products/privacy-policy-generator/
+```
+
+## Local Run & Testing (from consolidated file)
+
+### Prereqs
+- Node 20, Xcode 15 (for iOS), JDK 17 + Android SDK 34+ (for Android)
+
+### Run the app (first install from single file)
+```bash
+cd "apps/get-rich-game/docs/study buddy"
+python ./split_study_buddy.py --create
+cd ./study-buddy
+npm install
+npm run start
+# or: npm run ios
+# or: npm run android
+```
+
+Notes:
+- Dev builds do not require Sentry/PostHog/RevenueCat credentials; those are enforced only for production.
+- iOS silent mode speech is enabled by `Audio.setAudioModeAsync({ playsInSilentModeIOS: true })`.
+
+### Run unit tests (Jest)
+```bash
+npm run test
+```
+
+### Generate and run E2E tests (Detox, real implementation)
+```bash
+cd "apps/get-rich-game/docs/study buddy"
+python ./split_study_buddy_testing.py --create
+cd ./study-buddy
+
+# iOS simulator
+detox build -c ios.sim.debug
+npm run test:e2e:ios
+
+# Android emulator
+detox build -c android.emu.debug
+npm run test:e2e:android
+```
+
+E2E notes:
+- Uses real app code paths (no mocks). Provide RevenueCat sandbox keys to test purchases.
+- Ensure simulators/emulators have notifications and camera permissions granted.
+
+## Success Criteria
+
+Before launch, ensure:
+- [ ] Crash reporting active
+- [ ] Critical E2E tests pass
+- [ ] All assets integrated
+- [ ] Privacy policy live
+- [ ] Support email working
+- [ ] App store materials ready
+- [ ] Beta feedback incorporated
+- [ ] Voice speaks in foreground (iOS/Android) with silent-mode support on iOS
+- [ ] Notification actions (Resume/Break/Done) work on iOS/Android
+- [ ] Module aliases resolve in dev, test, and build
+- [ ] Session messaging varies across sessions (salt), avoids near-term repeats (LRU), and respects phase coherence with jittered thresholds
+
+This keeps you on track for the 3-week timeline while ensuring production quality!

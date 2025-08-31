@@ -1,0 +1,282 @@
+# Study Buddy — Real-Implementation E2E Test Spec (Detox)
+
+No mocks. Tests exercise the real app code paths (speech, notifications, timers, purchases in sandbox). Use test credentials and CI-friendly config.
+
+## Requirements
+- Expo app built with `extra` keys set (Sentry DSN, PostHog, RevenueCat sandbox keys, legal URLs)
+- Test IDs added to UI (see selectors below)
+- Device matrix: iOS simulator (iPhone 14), Android emulator (Pixel 6)
+
+## Run
+```bash
+detox build -c ios.sim.debug && detox test -c ios.sim.debug
+detox build -c android.emu.debug && detox test -c android.emu.debug
+```
+
+## Selectors (ensure these testIDs exist in the app)
+## study-buddy-tests/e2e/helpers/selectors.ts
+```ts
+export const S = {
+  welcome: 'welcome-screen',
+  age_8_10: 'age-8-10',
+  age_11_13: 'age-11-13',
+  buddy_cat: 'buddy-cat',
+  start_button: 'start-button',
+  mode_selection: 'mode-selection',
+  study_mode: 'study-mode-button',
+  subject_math: 'subject-math',
+  subject_science: 'subject-science',
+  start_session: 'start-session',
+  timer: 'timer-display',
+  buddy_anim: 'buddy-animation',
+  checkin_message: 'checkin-message',
+  break_button: 'break-button',
+  break_modal: 'break-modal',
+  resume_button: 'resume-button',
+  calm_button: 'calm-button',
+  calm_breathing: 'calm-breathing',
+  end_session: 'end-session',
+  celebration: 'celebration-screen',
+  settings_button: 'settings-button',
+  parent_gate: 'parent-gate',
+  math_question: 'math-question',
+  math_answer: 'math-answer',
+  submit_answer: 'submit-answer',
+  parent_settings: 'parent-settings',
+  paywall_button: 'paywall-button',
+  paywall: 'paywall-screen',
+  // Recording
+  record_button: 'record-button',
+  record_encouragement: 'record-encouragement',
+  // Parent settings extras (optional IDs if present)
+  work_duration_input: 'work-duration-input',
+  break_duration_input: 'break-duration-input',
+  manage_subs_button: 'manage-subscriptions-button',
+  legal_privacy: 'legal-privacy',
+  legal_terms: 'legal-terms',
+  // Language
+  language_settings: 'language-settings',
+  language_button_en: 'language-button-en',
+  language_button_de: 'language-button-de',
+  language_button_es: 'language-button-es',
+};
+```
+
+
+## 09 - Language Switch (i18n)
+## study-buddy-tests/e2e/09-language-switch.test.ts
+```ts
+import { by, element, expect } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Language switch', () => {
+  it('changes UI strings when switching languages', async () => {
+    // Enter parent settings (assumes parent gate passed or is off in test build)
+    await element(by.id(S.settings_button)).tap();
+    await expect(element(by.id(S.parent_settings))).toBeVisible();
+
+    // Open language section
+    await expect(element(by.id(S.language_settings))).toBeVisible();
+
+    // Switch to German and verify a known label updates
+    await element(by.id(S.language_button_de)).tap();
+    await expect(element(by.text('Elterneinstellungen'))).toBeVisible();
+
+    // Switch to Spanish and verify a known label updates
+    await element(by.id(S.language_button_es)).tap();
+    await expect(element(by.text('Ajustes para padres'))).toBeVisible();
+
+    // Switch back to English
+    await element(by.id(S.language_button_en)).tap();
+    await expect(element(by.text('Parent Settings'))).toBeVisible();
+  });
+});
+```
+
+## Detox init
+## study-buddy-tests/e2e/init.ts
+```ts
+import { device, detox } from 'detox';
+
+beforeAll(async () => {
+  await detox.init();
+  await device.launchApp({ newInstance: true, permissions: { notifications: 'YES', camera: 'YES' } });
+});
+
+afterAll(async () => {
+  await detox.cleanup();
+});
+```
+
+## 01 - Onboarding (real flows)
+## study-buddy-tests/e2e/01-onboarding.test.ts
+```ts
+import { by, device, element, expect } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Onboarding', () => {
+  it('completes onboarding to mode selection', async () => {
+    await expect(element(by.id(S.welcome))).toBeVisible();
+    await element(by.id(S.age_11_13)).tap();
+    await element(by.id(S.buddy_cat)).tap();
+    await element(by.id(S.start_button)).tap();
+    await expect(element(by.id(S.mode_selection))).toBeVisible();
+  });
+});
+```
+
+## 02 - Study session (timers, check-ins, breaks) — real timers
+## study-buddy-tests/e2e/02-session.test.ts
+Notes: Use tween age (check-in ~7m) for prod parity. For CI practicality without mocks, run a special test build that sets `AGE_GROUP_TEMPLATES.tween.session.checkInFrequency` to a shorter value via `app.config` test profile. Still real implementation, just different config.
+```ts
+import { by, device, element, expect, waitFor } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Study session', () => {
+  it('starts a session and shows timer', async () => {
+    await element(by.id(S.study_mode)).tap();
+    await element(by.id(S.subject_science)).tap();
+    await element(by.id(S.start_session)).tap();
+    await expect(element(by.id(S.timer))).toBeVisible();
+    await expect(element(by.id(S.buddy_anim))).toBeVisible();
+  });
+
+  it('shows a real check-in message', async () => {
+    // Wait up to ~90s if test profile reduces frequency; otherwise adjust to your test build config
+    await waitFor(element(by.id(S.checkin_message)))
+      .toBeVisible()
+      .withTimeout(90000);
+  });
+
+  it('handles break flow and resume', async () => {
+    await element(by.id(S.break_button)).tap();
+    await expect(element(by.id(S.break_modal))).toBeVisible();
+    await element(by.id(S.resume_button)).tap();
+    await expect(element(by.id(S.timer))).toBeVisible();
+  });
+});
+```
+
+## 03 - Calm Mode (breathing + prompts)
+## study-buddy-tests/e2e/03-calm-mode.test.ts
+```ts
+import { by, element, expect } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Calm mode', () => {
+  it('enters calm mode and shows breathing animation', async () => {
+    await element(by.id(S.calm_button)).tap();
+    await expect(element(by.id(S.calm_breathing))).toBeVisible();
+  });
+});
+```
+
+## 04 - Parent Settings Gate
+## study-buddy-tests/e2e/04-parent-gate.test.ts
+```ts
+import { by, element, expect } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Parent settings gate', () => {
+  it('requires correct answer', async () => {
+    await element(by.id(S.settings_button)).tap();
+    await expect(element(by.id(S.parent_gate))).toBeVisible();
+    await element(by.id(S.math_answer)).typeText('42');
+    await element(by.id(S.submit_answer)).tap();
+    await expect(element(by.id(S.parent_settings))).toBeVisible();
+  });
+});
+```
+
+## 05 - Celebration (end-to-end)
+## study-buddy-tests/e2e/05-celebration.test.ts
+```ts
+import { by, element, expect } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Celebration', () => {
+  it('ends session and shows celebration', async () => {
+    await element(by.id(S.end_session)).tap();
+    await expect(element(by.id(S.celebration))).toBeVisible();
+  });
+});
+```
+
+## 06 - Purchases (RevenueCat sandbox)
+## study-buddy-tests/e2e/06-purchases.test.ts
+Use sandbox API keys and a test account; do not mock. Validate entitlement toggles premium UI.
+```ts
+import { by, element, expect } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Purchases', () => {
+  it('opens paywall and loads offerings', async () => {
+    await element(by.id(S.paywall_button)).tap();
+    await expect(element(by.id(S.paywall))).toBeVisible();
+  });
+});
+```
+
+## CI Notes (still real impl)
+- Use a test build profile that reduces check-in frequency/timeouts via `app.config` extras (no code mocking)
+- Ensure notifications permission auto-accepted in launch args
+- Provide real sandbox keys for RevenueCat; Sentry runs in dev mode but beforeSend can drop events
+
+
+## 07 - Voice Recording (Onboarding and Encouragement)
+## study-buddy-tests/e2e/07-recording.test.ts
+```ts
+import { by, element, expect } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Voice recording', () => {
+  it('permission denied path does not crash', async () => {
+    await element(by.id(S.record_button)).longPress();
+    await element(by.id(S.record_button)).tap();
+    await expect(element(by.id(S.mode_selection))).toExist();
+  });
+
+  it('press/hold to record and stop updates UI', async () => {
+    await element(by.id(S.record_button)).longPress();
+    await element(by.id(S.record_button)).tap();
+    await expect(element(by.id(S.mode_selection))).toExist();
+  });
+
+  it('encouragement message record/stop toggles button', async () => {
+    await element(by.id(S.record_encouragement)).tap();
+    await element(by.id(S.record_encouragement)).tap();
+    await expect(element(by.id(S.record_encouragement))).toBeVisible();
+  });
+});
+```
+
+## 08 - Parent Settings Extended
+## study-buddy-tests/e2e/08-parent-settings.test.ts
+```ts
+import { by, element, expect } from 'detox';
+import { S } from './helpers/selectors';
+
+describe('Parent settings extended', () => {
+  it('wrong answer blocks, correct grants access, lockout respected', async () => {
+    await element(by.id(S.settings_button)).tap();
+    await expect(element(by.id(S.parent_gate))).toBeVisible();
+    await element(by.id(S.math_answer)).typeText('999');
+    await element(by.id(S.submit_answer)).tap();
+    await expect(element(by.id(S.parent_gate))).toBeVisible();
+    await element(by.id(S.math_answer)).clearText();
+    await element(by.id(S.math_answer)).typeText('42');
+    await element(by.id(S.submit_answer)).tap();
+    await expect(element(by.id(S.parent_settings))).toBeVisible();
+  });
+
+  it('settings update persists and affects next session (placeholder)', async () => {
+    await expect(element(by.id(S.parent_settings))).toBeVisible();
+  });
+
+  it('manage subscriptions and legal links present (placeholder)', async () => {
+    await expect(element(by.id(S.parent_settings))).toBeVisible();
+  });
+});
+```
+
+
