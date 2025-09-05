@@ -29,7 +29,28 @@ class StudyBuddySplitter:
             'src/utils/audio.ts',
             'src/utils/peerLines.ts',
             'src/utils/voice.ts',
+            'App.tsx',
         ])
+
+    def _rewrite_imports(self, content: str) -> str:
+        """Rewrite aliased imports to match Expo Router structure using @/* alias."""
+        patterns = [
+            (r"from\s+['\"]@utils/", "from '@/app/lib/"),
+            (r"from\s+['\"]@config/?", "from '@/app/lib/config"),
+            (r"from\s+['\"]@types/", "from '@/app/lib/types/"),
+            (r"from\s+['\"]@content/", "from '@/app/lib/content/"),
+            (r"from\s+['\"]@ui/alerts['\"]", "from '@/app/lib/ui/alerts'"),
+            (r"from\s+['\"]@ui/tokens['\"]", "from '@/app/lib/ui/tokens'"),
+            (r"from\s+['\"]@ui/", "from '@/app/lib/ui/"),
+            (r"from\s+['\"]@components/", "from '@/components/"),
+            (r"from\s+['\"]@assets/", "from '@/assets/"),
+        ]
+        for pat, repl in patterns:
+            content = re.sub(pat, repl, content)
+
+        # Fix registry requires now that it lives in app/lib/assets/ and animations in assets/animations/
+        content = content.replace("require('../assets/animations/", "require('../../assets/animations/")
+        return content
         
     def parse_file(self):
         """Parse the consolidated file and extract individual files."""
@@ -96,9 +117,12 @@ class StudyBuddySplitter:
         if not self.current_file or not self.current_content:
             return
             
+        # Destination-agnostic: use the exact path from the section header
+        content = ''.join(self.current_content)
+        content = self._rewrite_imports(content)
         self.files_to_create.append({
             'path': os.path.join(self.output_dir, self.current_file),
-            'content': ''.join(self.current_content).rstrip() + '\n',
+            'content': content.rstrip() + '\n',
             'line_start': self.line_number - len(self.current_content) - 2
         })
     
@@ -200,11 +224,11 @@ class StudyBuddySplitter:
                 issues.append(f"Large file detected: {path} ({size} bytes)")
         
         if issues:
-            print("⚠️  Issues found:")
+            print("[WARN] Issues found:")
             for issue in issues:
                 print(f"  - {issue}")
         else:
-            print("✅ No issues found!")
+            print("[OK] No issues found!")
     
     def run(self):
         """Execute the splitting process."""
@@ -218,10 +242,10 @@ class StudyBuddySplitter:
                 print(f"\n[DRY RUN COMPLETE] No files were created.")
                 print(f"To actually create the files, run without --dry-run flag")
             else:
-                print(f"\n✅ Successfully created {len(self.files_to_create)} files!")
+                print(f"\n[OK] Successfully created {len(self.files_to_create)} files!")
                 
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            print(f"\n[ERROR] {e}")
             if self.line_number:
                 print(f"   Last processed line: {self.line_number}")
             raise
